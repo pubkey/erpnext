@@ -1,0 +1,598 @@
+From 375e8d7fa1e69ff01675aa767013effebf01b475 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 11 Nov 2026 14:49:45 +0000
+Subject: [PATCH] feat(list view): realtime updates with EventReduce (behind a
+ System Setting)
+
+The realtime update of the list view merges the changed documents into
+the rows it has and sorts them again. It never trims the list to the
+page length and never fetches the row that moves up when a row leaves a
+full page, so the list can show too many rows or miss rows until it is
+refreshed.
+
+With the new System Setting "Incremental Realtime List Updates" (off by
+default), the list view calculates the new rows with event-reduce-js and
+its result window buffer. The server event and the permission-checked
+query for the changed documents stay the same. The list is refreshed
+fully only when EventReduce cannot calculate the result.
+
+Lists with filters or sort fields that cannot be translated keep the
+current behaviour.
+---
+ .../system_settings/system_settings.json      |  16 +-
+ .../system_settings/system_settings.py        |   1 +
+ .../js/frappe/list/list_result_window.js      | 290 ++++++++++++++++++
+ frappe/public/js/frappe/list/list_view.js     | 107 ++++++-
+ package.json                                  |   1 +
+ yarn.lock                                     |  18 ++
+ 6 files changed, 428 insertions(+), 5 deletions(-)
+ create mode 100644 frappe/public/js/frappe/list/list_result_window.js
+
+diff --git a/frappe/core/doctype/system_settings/system_settings.json b/frappe/core/doctype/system_settings/system_settings.json
+index aecbf00..0bb9f06 100644
+--- a/frappe/core/doctype/system_settings/system_settings.json
++++ b/frappe/core/doctype/system_settings/system_settings.json
+@@ -125,6 +125,8 @@
+   "column_break_nebx",
+   "allow_clearing_link_fields",
+   "enable_combobox_link_field",
++  "list_view_section",
++  "event_reduce_list_updates",
+   "api_logging_section",
+   "log_api_requests",
+   "ai_agents_tab",
+@@ -730,6 +732,18 @@
+    "fieldtype": "Check",
+    "label": "Show Absolute Datetime in Timeline"
+   },
++  {
++   "fieldname": "list_view_section",
++   "fieldtype": "Section Break",
++   "label": "List View"
++  },
++  {
++   "default": "0",
++   "description": "Calculate realtime list view updates on the client with EventReduce instead of merging changed documents into the list. The list is refreshed fully only when the new result cannot be calculated.",
++   "fieldname": "event_reduce_list_updates",
++   "fieldtype": "Check",
++   "label": "Incremental Realtime List Updates"
++  },
+   {
+    "fieldname": "api_logging_section",
+    "fieldtype": "Section Break",
+@@ -908,7 +922,7 @@
+  "icon": "fa fa-cog",
+  "issingle": 1,
+  "links": [],
+- "modified": "2026-11-04 11:19:08.065028",
++ "modified": "2026-11-11 15:00:00.000000",
+  "modified_by": "Administrator",
+  "module": "Core",
+  "name": "System Settings",
+diff --git a/frappe/core/doctype/system_settings/system_settings.py b/frappe/core/doctype/system_settings/system_settings.py
+index fd6c010..af37eb9 100644
+--- a/frappe/core/doctype/system_settings/system_settings.py
++++ b/frappe/core/doctype/system_settings/system_settings.py
+@@ -64,6 +64,7 @@ class SystemSettings(Document):
+ 		enable_telemetry: DF.Check
+ 		enable_two_factor_auth: DF.Check
+ 		encrypt_backup: DF.Check
++		event_reduce_list_updates: DF.Check
+ 		first_day_of_the_week: DF.Literal[
+ 			"Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
+ 		]
+diff --git a/frappe/public/js/frappe/list/list_result_window.js b/frappe/public/js/frappe/list/list_result_window.js
+new file mode 100644
+index 0000000..9004b03
+--- /dev/null
++++ b/frappe/public/js/frappe/list/list_result_window.js
+@@ -0,0 +1,290 @@
++import {
++	applyChangeEventsToResultWindowBuffer,
++	createResultWindowBuffer,
++	getRecommendedResultWindowBufferSize,
++	getResultWindowBufferResults,
++	resetResultWindowBuffer,
++} from "event-reduce-js";
++
++const NUMERIC_FIELDTYPES = ["Int", "Float", "Currency", "Percent", "Duration", "Check", "Rating"];
++const DATE_FIELDTYPES = ["Date", "Datetime", "Time"];
++// These have no docfield, but the list filters on them.
++const STANDARD_FIELDTYPES = {
++	name: "Data",
++	owner: "Data",
++	modified_by: "Data",
++	creation: "Datetime",
++	modified: "Datetime",
++	docstatus: "Int",
++	idx: "Int",
++	_assign: "Text",
++	_user_tags: "Text",
++	_liked_by: "Text",
++	_comments: "Text",
++};
++const COMPARISON_OPERATORS = { "<": "$lt", ">": "$gt", "<=": "$lte", ">=": "$gte" };
++
++// MariaDB compares names without case and accents (utf8mb4_unicode_ci)
++const name_collator = new Intl.Collator("en", { sensitivity: "base" });
++
++function is_empty(value) {
++	return value === null || value === undefined || value === "";
++}
++
++function like_to_regex(pattern) {
++	const escaped = String(pattern).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
++	return "^" + escaped.replace(/%/g, "[\\s\\S]*").replace(/_/g, "[\\s\\S]") + "$";
++}
++
++/**
++ * Translates list view filters like [doctype, fieldname, operator, value]
++ * into a Mongo-style selector: { $and: [{ status: { $in: ["Unpaid", "Overdue"] } }] }.
++ * Returns null if a filter cannot be translated (child table filters, unknown
++ * fields and operators like "Timespan" or "descendants of").
++ */
++export function get_mongo_selector(filters, doctype, get_fieldtype) {
++	const conditions = [];
++	for (const filter of filters || []) {
++		if (!Array.isArray(filter) || filter.length < 4 || filter[0] !== doctype) {
++			return null;
++		}
++		const fieldname = filter[1];
++		const fieldtype = STANDARD_FIELDTYPES[fieldname] || get_fieldtype(fieldname);
++		if (!fieldtype) {
++			return null;
++		}
++		const condition = get_condition(String(filter[2]).toLowerCase(), filter[3], fieldtype);
++		if (!condition) {
++			return null;
++		}
++		conditions.push({ [fieldname]: condition });
++	}
++	return { $and: conditions };
++}
++
++function get_condition(operator, value, fieldtype) {
++	const is_numeric = NUMERIC_FIELDTYPES.includes(fieldtype);
++	const cast = (v) => (is_numeric ? Number(v) : String(v));
++	const is_valid = (v) =>
++		!is_empty(v) && typeof v !== "object" && !(is_numeric && isNaN(cast(v)));
++
++	if (operator === "is") {
++		if (value === "set") return { $nin: [null, ""] };
++		if (value === "not set") return { $in: [null, ""] };
++		return null;
++	}
++	if (operator === "=" || operator === "!=") {
++		if (is_empty(value) && !is_numeric) {
++			return operator === "=" ? { $in: [null, ""] } : { $nin: [null, ""] };
++		}
++		if (!is_valid(value)) return null;
++		return { [operator === "=" ? "$eq" : "$ne"]: cast(value) };
++	}
++	if (operator in COMPARISON_OPERATORS) {
++		if (!is_valid(value)) return null;
++		return { [COMPARISON_OPERATORS[operator]]: cast(value) };
++	}
++	if (operator === "in" || operator === "not in") {
++		const values = typeof value === "string" ? value.split(",").map((v) => v.trim()) : value;
++		if (!Array.isArray(values) || !values.length || !values.every(is_valid)) return null;
++		return { [operator === "in" ? "$in" : "$nin"]: values.map(cast) };
++	}
++	if (operator === "like") {
++		if (is_numeric || !is_valid(value)) return null;
++		return { $regex: like_to_regex(value), $options: "i" };
++	}
++	if (operator === "between") {
++		if (!Array.isArray(value) || value.length !== 2 || !value.every(is_valid)) return null;
++		let [from, to] = value.map(cast);
++		if (fieldtype === "Datetime") {
++			// a date without time means the whole day
++			if (from.length === 10) from += " 00:00:00.000000";
++			if (to.length === 10) to += " 23:59:59.999999";
++		}
++		return { $gte: from, $lte: to };
++	}
++	return null;
++}
++
++export function matches_selector(doc, selector) {
++	return selector.$and.every((condition) =>
++		Object.keys(condition).every((fieldname) =>
++			matches_condition(doc[fieldname], condition[fieldname])
++		)
++	);
++}
++
++function matches_condition(value, condition) {
++	if (value === undefined) value = null;
++	return Object.keys(condition).every((operator) => {
++		const expected = condition[operator];
++		if (typeof expected === "number" && typeof value === "string" && value !== "") {
++			value = Number(value);
++		}
++		switch (operator) {
++			case "$eq":
++				return value === expected;
++			case "$ne":
++				return value !== expected;
++			case "$in":
++				return expected.includes(value);
++			case "$nin":
++				return !expected.includes(value);
++			case "$lt":
++				return value !== null && value < expected;
++			case "$gt":
++				return value !== null && value > expected;
++			case "$lte":
++				return value !== null && value <= expected;
++			case "$gte":
++				return value !== null && value >= expected;
++			case "$regex":
++				return (
++					typeof value === "string" &&
++					new RegExp(expected, condition.$options).test(value)
++				);
++			case "$options":
++				return true;
++		}
++		return false;
++	});
++}
++
++/**
++ * Sorts like `order by sort_by sort_order, name sort_order` of the list query.
++ * Returns null for sort fields whose order depends on the database collation.
++ */
++export function get_sort_comparator(sort_by, sort_order, fieldtype) {
++	fieldtype = STANDARD_FIELDTYPES[sort_by] || fieldtype;
++	let compare_values;
++	if (sort_by === "name") {
++		compare_values = () => 0;
++	} else if (NUMERIC_FIELDTYPES.includes(fieldtype)) {
++		// null is the lowest value
++		const to_number = (v) => (is_empty(v) ? -Infinity : Number(v));
++		compare_values = (a, b) => to_number(a) - to_number(b);
++	} else if (DATE_FIELDTYPES.includes(fieldtype)) {
++		const to_string = (v) => (is_empty(v) ? "" : String(v));
++		compare_values = (a, b) =>
++			to_string(a) < to_string(b) ? -1 : to_string(a) > to_string(b) ? 1 : 0;
++	} else {
++		return null;
++	}
++	const direction = sort_order === "desc" ? -1 : 1;
++	return (a, b) => {
++		const result =
++			compare_values(a[sort_by], b[sort_by]) ||
++			name_collator.compare(String(a.name), String(b.name));
++		// only two versions of the same document are equal
++		return result ? (result * direction > 0 ? 1 : -1) : 1;
++	};
++}
++
++/**
++ * The rows of a list view and some rows after them, kept up to date with
++ * EventReduce and its result window buffer.
++ */
++export class ListResultWindow {
++	/**
++	 * Returns null if EventReduce cannot calculate the result of this list,
++	 * so the list keeps its default realtime updates.
++	 */
++	static create({ doctype, filters, sort_by, sort_order, limit, buffer_size, get_fieldtype }) {
++		const selector = get_mongo_selector(filters, doctype, get_fieldtype);
++		const comparator = get_sort_comparator(sort_by, sort_order, get_fieldtype(sort_by));
++		if (!selector || !comparator || !limit) {
++			return null;
++		}
++		return new ListResultWindow({ selector, comparator, sort_by, limit, buffer_size });
++	}
++
++	constructor({ selector, comparator, sort_by, limit, buffer_size }) {
++		this.selector = selector;
++		this.fieldnames = [...new Set(["name", sort_by, ...selector.$and.flatMap(Object.keys)])];
++		this.limit = limit;
++		this.outdated = true;
++		this.buffer = createResultWindowBuffer(
++			{
++				primaryKey: "name",
++				getDocumentId: (doc) => String(doc.name),
++				sortFields: [sort_by, "name"],
++				// A list view has no skip: "Load More" adds rows to the same list.
++				limit,
++				queryMatcher: (doc) => matches_selector(doc, selector),
++				sortComparator: comparator,
++			},
++			{ limitBufferSize: buffer_size ?? getRecommendedResultWindowBufferSize(limit) }
++		);
++	}
++
++	// number of rows to query, starting at the first row
++	get page_length() {
++		return this.limit + this.buffer.limitBufferSize;
++	}
++
++	get results() {
++		return getResultWindowBufferResults(this.buffer);
++	}
++
++	/**
++	 * Loads the rows of a list query that ran with this.page_length.
++	 * Returns false if the rows are not what the selector and the comparator
++	 * expect, for example because a field is not part of the list query.
++	 */
++	reset(rows) {
++		const { queryMatcher, sortComparator } = this.buffer.queryParams;
++		const usable = rows.every(
++			(row, index) =>
++				this.fieldnames.every((fieldname) => row[fieldname] !== undefined) &&
++				queryMatcher(row) &&
++				(index === 0 || sortComparator(rows[index - 1], row) < 0)
++		);
++		if (usable) {
++			resetResultWindowBuffer(this.buffer, rows);
++		}
++		this.outdated = !usable;
++		return usable;
++	}
++
++	// call this when a change did not reach apply()
++	invalidate() {
++		this.outdated = true;
++	}
++
++	/**
++	 * Applies the changed documents.
++	 * @param names names of the documents that changed
++	 * @param rows their current rows from the list query, without the documents
++	 *     that were deleted, do not match the filters anymore or cannot be read
++	 * @returns { run_full_query: true } or { run_full_query: false, changed, results }
++	 */
++	apply(names, rows) {
++		if (this.outdated) {
++			return { run_full_query: true };
++		}
++		const docs = new Map(rows.map((row) => [String(row.name), row]));
++		const change_events = [];
++		for (const id of new Set(names.map(String))) {
++			const doc = docs.get(id) || null;
++			// The server only tells the name of a changed document. Its previous
++			// state is the row in the buffer. If it is not there, it did not match
++			// or it sorted after the buffer. Both behave like an insert, because
++			// there are no rows before the buffer.
++			const previous = this.buffer.keyDocumentMap.get(id) || null;
++			if (doc && !this.buffer.queryParams.queryMatcher(doc)) {
++				// the selector differs from the filters of the server
++				this.outdated = true;
++				return { run_full_query: true };
++			}
++			if (doc || previous) {
++				const operation = !previous ? "INSERT" : doc ? "UPDATE" : "DELETE";
++				change_events.push({ operation, id, doc, previous });
++			}
++		}
++		const result = applyChangeEventsToResultWindowBuffer(this.buffer, change_events);
++		this.outdated = result.runFullQueryAgain;
++		return result.runFullQueryAgain
++			? { run_full_query: true }
++			: { run_full_query: false, changed: result.changed, results: result.results };
++	}
++}
+diff --git a/frappe/public/js/frappe/list/list_view.js b/frappe/public/js/frappe/list/list_view.js
+index 7bfc1e2..a59040d 100644
+--- a/frappe/public/js/frappe/list/list_view.js
++++ b/frappe/public/js/frappe/list/list_view.js
+@@ -1,5 +1,6 @@
+ import BulkOperations from "./bulk_operations";
+ import ListSettings from "./list_settings";
++import { ListResultWindow } from "./list_result_window";
+ 
+ const LONG_PRESS_MS = 500;
+ const LONG_PRESS_SLOP_PX = 10;
+@@ -647,8 +648,9 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+ 			.catch(() => {
+ 				this._virtualization_bundle_failed = true;
+ 			})
+-			.then(() =>
+-				super.refresh().then(() => {
++			.then(() => {
++				this.pending_result_window = this.create_result_window();
++				return super.refresh().then(() => {
+ 					if (refresh_header && !this._header_rendered_in_list) {
+ 						this.render_header(true);
+ 						this.apply_column_widths();
+@@ -659,8 +661,60 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+ 					this.update_url_with_filters();
+ 					this.setup_realtime_updates();
+ 					this.apply_styles_basedon_dropdown();
+-				})
+-			);
++				});
++			});
++	}
++
++	create_result_window() {
++		// Realtime updates with EventReduce, see process_document_refreshes().
++		if (
++			!cint(frappe.boot.sysdefaults?.event_reduce_list_updates) ||
++			this.view_name !== "List" ||
++			this.method !== "frappe.desk.reportview.get"
++		) {
++			return null;
++		}
++		return ListResultWindow.create({
++			doctype: this.doctype,
++			filters: this.get_filters_for_args(),
++			sort_by: this.sort_by,
++			sort_order: this.sort_order,
++			limit: this.start + this.page_length,
++			buffer_size: this.result_window_buffer_size,
++			get_fieldtype: (fieldname) =>
++				frappe.meta.get_docfield(this.doctype, fieldname)?.fieldtype,
++		});
++	}
++
++	get_call_args() {
++		const call_args = super.get_call_args();
++		if (this.pending_result_window) {
++			// query all rows of the list and the rows of the buffer after them
++			call_args.args.start = 0;
++			call_args.args.page_length = this.pending_result_window.page_length;
++		}
++		return call_args;
++	}
++
++	prepare_data(r) {
++		const result_window = this.pending_result_window;
++		if (!result_window) {
++			this.result_window = null;
++			return super.prepare_data(r);
++		}
++		// the rows start at the first row, also after "Load More"
++		const start = this.start;
++		this.start = 0;
++		super.prepare_data(r);
++		this.start = start;
++
++		if (result_window.reset(this.data)) {
++			this.result_window = result_window;
++			this.data = result_window.results;
++		} else {
++			this.result_window = this.pending_result_window = null;
++			this.data = this.data.slice(0, result_window.limit);
++		}
+ 	}
+ 
+ 	update_checkbox() {
+@@ -2667,10 +2721,12 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+ 
+ 			// if some bulk operation is happening by selecting list items, don't refresh
+ 			if (this.checked_docnames.size) {
++				this.result_window?.invalidate();
+ 				return;
+ 			}
+ 
+ 			if (this.avoid_realtime_update()) {
++				this.result_window?.invalidate();
+ 				return;
+ 			}
+ 
+@@ -2705,6 +2761,7 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+ 		const route = frappe.get_route() || [];
+ 		if (!cur_list || route[0] != "List" || cur_list.doctype != route[1]) {
+ 			// wait till user is back on list view before refreshing
++			this.result_window?.invalidate();
+ 			this.pending_document_refreshes = [];
+ 			this.disable_realtime_updates();
+ 			return;
+@@ -2717,6 +2774,10 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+ 
+ 		if (!names.length) return;
+ 
++		if (this.result_window) {
++			return this.apply_changes_to_result_window(names);
++		}
++
+ 		// filters to get only the doc with this name
+ 		const call_args = this.get_call_args();
+ 		call_args.args.filters.push([this.doctype, "name", "in", names]);
+@@ -2773,6 +2834,44 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+ 		});
+ 	}
+ 
++	apply_changes_to_result_window(names) {
++		// one after the other, so the changes are applied in order
++		this.result_window_queue = (this.result_window_queue || Promise.resolve()).then(() => {
++			const result_window = this.result_window;
++			if (!result_window) return;
++
++			const call_args = this.get_call_args();
++			call_args.args.filters.push([this.doctype, "name", "in", names]);
++			call_args.args.start = 0;
++			call_args.args.page_length = names.length;
++
++			return frappe
++				.call(call_args)
++				.then(({ message }) => {
++					const rows = message ? frappe.utils.dict(message.keys, message.values) : [];
++					// a list that was refreshed in the meantime may not have these changes
++					const result =
++						result_window === this.result_window
++							? result_window.apply(names, rows)
++							: { run_full_query: true };
++					if (result.run_full_query) {
++						this.last_args = null;
++						return this.refresh();
++					}
++					if (!result.changed) return;
++
++					this.data = result.results;
++					if (this.checked_docnames.size) {
++						this.set_rows_as_checked();
++					}
++					this.toggle_result_area();
++					this.render_list();
++				})
++				.catch(() => this.result_window?.invalidate());
++		});
++		return this.result_window_queue;
++	}
++
+ 	avoid_realtime_update() {
+ 		if (this.filter_area?.is_being_edited()) {
+ 			return true;
+diff --git a/package.json b/package.json
+index 7f07b2b..7297215 100644
+--- a/package.json
++++ b/package.json
+@@ -46,6 +46,7 @@
+     "editorjs-undo": "0.1.6",
+     "esbuild": "^0.28.1",
+     "esbuild-plugin-vue3": "^0.3.0",
++    "event-reduce-js": "7.5.1",
+     "fast-deep-equal": "^2.0.1",
+     "fast-glob": "^3.2.5",
+     "frappe-charts": "2.0.0-rc31",
+diff --git a/yarn.lock b/yarn.lock
+index f704fec..b24f4e7 100644
+--- a/yarn.lock
++++ b/yarn.lock
+@@ -714,11 +714,21 @@ anymatch@~3.1.2:
+     normalize-path "^3.0.0"
+     picomatch "^2.0.4"
+ 
++array-push-at-sort-position@5.0.0:
++  version "5.0.0"
++  resolved "https://registry.yarnpkg.com/array-push-at-sort-position/-/array-push-at-sort-position-5.0.0.tgz#89a87c138865056a7ae37526922c8b6b75ceefb7"
++  integrity sha512-17lCQ5mcO+ybx8b0zU9fWniRj48K7Sa7XIwEeYA6p65NT+KCV6lMGYyPon2Kr5uBGOd4f8oAiz9xnEImEzmEog==
++
+ awesomplete@^1.1.5:
+   version "1.1.5"
+   resolved "https://registry.yarnpkg.com/awesomplete/-/awesomplete-1.1.5.tgz#1b2b5dd106d3955595619c03da472a1dc0faf0af"
+   integrity sha512-UFw1mPW8NaSECDSTC36HbAOTpF9JK2wBUJcNn4MSvlNtK7SZ9N72gB+ajHtA6D1abYXRcszZnBA4nHBwvFwzHw==
+ 
++binary-decision-diagram@6.0.1:
++  version "6.0.1"
++  resolved "https://registry.yarnpkg.com/binary-decision-diagram/-/binary-decision-diagram-6.0.1.tgz#063afc77afd9125b9f00788525ef98f438e7798a"
++  integrity sha512-5GJuGrCGyrDLAXhOH6Iw8dE4xo92dpT/972wVz4qkegUD4gN/fm3XwhSDZwMXyUCjovq4sKmgBlh4Z4gFwlu+w==
++
+ binary-extensions@^2.0.0:
+   version "2.2.0"
+   resolved "https://registry.yarnpkg.com/binary-extensions/-/binary-extensions-2.2.0.tgz#75f502eeaf9ffde42fc98829645be4ea76bd9e2d"
+@@ -1138,6 +1148,14 @@ estree-walker@^2.0.2:
+   resolved "https://registry.yarnpkg.com/estree-walker/-/estree-walker-2.0.2.tgz#52f010178c2a4c117a7757cfe942adb7d2da4cac"
+   integrity sha512-Rfkk/Mp/DL7JVje3u18FxFujQlTNR2q6QfMSMB7AvCBx91NGj/ba3kCfza0f6dVDbw7YlRf/nDrn7pQrCCyQ/w==
+ 
++event-reduce-js@7.5.1:
++  version "7.5.1"
++  resolved "https://registry.yarnpkg.com/event-reduce-js/-/event-reduce-js-7.5.1.tgz#786d9f81b884784b250f5c69c2c995a8b6660ca6"
++  integrity sha512-Zsqh0WFnI9NiTRuYlRmpcOrDtgia3yeFfm1akJXSbIXlAUYhYMbOIynIGvmkyUUiNA5EODWNfNAuwDXPy3G/kg==
++  dependencies:
++    array-push-at-sort-position "5.0.0"
++    binary-decision-diagram "6.0.1"
++
+ eventemitter3@^2.0.3:
+   version "2.0.3"
+   resolved "https://registry.yarnpkg.com/eventemitter3/-/eventemitter3-2.0.3.tgz#b5e1079b59fb5e1ba2771c0a993be060a58c99ba"
+-- 
+2.43.0
+
