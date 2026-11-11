@@ -1,4 +1,4 @@
-From 375e8d7fa1e69ff01675aa767013effebf01b475 Mon Sep 17 00:00:00 2001
+From 3f27c177453b482631bb6d5f705bf7ac3488679f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 11 Nov 2026 14:49:45 +0000
 Subject: [PATCH] feat(list view): realtime updates with EventReduce (behind a
@@ -22,10 +22,10 @@ current behaviour.
  .../system_settings/system_settings.json      |  16 +-
  .../system_settings/system_settings.py        |   1 +
  .../js/frappe/list/list_result_window.js      | 290 ++++++++++++++++++
- frappe/public/js/frappe/list/list_view.js     | 107 ++++++-
+ frappe/public/js/frappe/list/list_view.js     | 119 ++++++-
  package.json                                  |   1 +
  yarn.lock                                     |  18 ++
- 6 files changed, 428 insertions(+), 5 deletions(-)
+ 6 files changed, 440 insertions(+), 5 deletions(-)
  create mode 100644 frappe/public/js/frappe/list/list_result_window.js
 
 diff --git a/frappe/core/doctype/system_settings/system_settings.json b/frappe/core/doctype/system_settings/system_settings.json
@@ -378,7 +378,7 @@ index 0000000..9004b03
 +	}
 +}
 diff --git a/frappe/public/js/frappe/list/list_view.js b/frappe/public/js/frappe/list/list_view.js
-index 7bfc1e2..a59040d 100644
+index 7bfc1e2..b5745b0 100644
 --- a/frappe/public/js/frappe/list/list_view.js
 +++ b/frappe/public/js/frappe/list/list_view.js
 @@ -1,5 +1,6 @@
@@ -388,7 +388,7 @@ index 7bfc1e2..a59040d 100644
  
  const LONG_PRESS_MS = 500;
  const LONG_PRESS_SLOP_PX = 10;
-@@ -647,8 +648,9 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+@@ -647,8 +648,15 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
  			.catch(() => {
  				this._virtualization_bundle_failed = true;
  			})
@@ -396,11 +396,17 @@ index 7bfc1e2..a59040d 100644
 -				super.refresh().then(() => {
 +			.then(() => {
 +				this.pending_result_window = this.create_result_window();
-+				return super.refresh().then(() => {
++				const refresh_id = this.refresh_id;
++				const refreshed = super.refresh();
++				if (this.pending_result_window && refresh_id !== this.refresh_id) {
++					// the response can be older than a change that arrives before it
++					this.changed_during_refresh ??= [];
++				}
++				return refreshed.then(() => {
  					if (refresh_header && !this._header_rendered_in_list) {
  						this.render_header(true);
  						this.apply_column_widths();
-@@ -659,8 +661,60 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+@@ -659,8 +667,65 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
  					this.update_url_with_filters();
  					this.setup_realtime_updates();
  					this.apply_styles_basedon_dropdown();
@@ -443,6 +449,8 @@ index 7bfc1e2..a59040d 100644
 +
 +	prepare_data(r) {
 +		const result_window = this.pending_result_window;
++		const changed_during_refresh = this.changed_during_refresh;
++		this.changed_during_refresh = null;
 +		if (!result_window) {
 +			this.result_window = null;
 +			return super.prepare_data(r);
@@ -456,6 +464,9 @@ index 7bfc1e2..a59040d 100644
 +		if (result_window.reset(this.data)) {
 +			this.result_window = result_window;
 +			this.data = result_window.results;
++			if (changed_during_refresh?.length) {
++				this.apply_changes_to_result_window([...new Set(changed_during_refresh)]);
++			}
 +		} else {
 +			this.result_window = this.pending_result_window = null;
 +			this.data = this.data.slice(0, result_window.limit);
@@ -463,7 +474,7 @@ index 7bfc1e2..a59040d 100644
  	}
  
  	update_checkbox() {
-@@ -2667,10 +2721,12 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+@@ -2667,10 +2732,12 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
  
  			// if some bulk operation is happening by selecting list items, don't refresh
  			if (this.checked_docnames.size) {
@@ -476,7 +487,15 @@ index 7bfc1e2..a59040d 100644
  				return;
  			}
  
-@@ -2705,6 +2761,7 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+@@ -2680,6 +2747,7 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+ 				return;
+ 			}
+ 
++			this.changed_during_refresh?.push(data.name);
+ 			this.pending_document_refreshes.push(data);
+ 			this.debounced_refresh();
+ 		});
+@@ -2705,6 +2773,7 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
  		const route = frappe.get_route() || [];
  		if (!cur_list || route[0] != "List" || cur_list.doctype != route[1]) {
  			// wait till user is back on list view before refreshing
@@ -484,7 +503,7 @@ index 7bfc1e2..a59040d 100644
  			this.pending_document_refreshes = [];
  			this.disable_realtime_updates();
  			return;
-@@ -2717,6 +2774,10 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+@@ -2717,6 +2786,10 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
  
  		if (!names.length) return;
  
@@ -495,7 +514,7 @@ index 7bfc1e2..a59040d 100644
  		// filters to get only the doc with this name
  		const call_args = this.get_call_args();
  		call_args.args.filters.push([this.doctype, "name", "in", names]);
-@@ -2773,6 +2834,44 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
+@@ -2773,6 +2846,44 @@ frappe.views.ListView = class ListView extends frappe.views.BaseList {
  		});
  	}
  
