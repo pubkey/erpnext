@@ -36,6 +36,15 @@ function create_site() {
 	return new MemorySite(invoices, TODAY);
 }
 
+const NEW_INVOICE = {
+	kind: "new_submitted",
+	customer: "Customer",
+	posting_date: TODAY,
+	due_date: "2026-12-31",
+	qty: 1,
+	rate: 100,
+};
+
 async function run(git_ref) {
 	const source = await load_list_view(process.env.FRAPPE_PATH, git_ref);
 	const site = create_site();
@@ -58,14 +67,7 @@ async function run(git_ref) {
 	for (let i = 0; i < 5; i++) await tick();
 	assert.ok(held);
 
-	const name = site.apply({
-		kind: "new_submitted",
-		customer: "Customer",
-		posting_date: TODAY,
-		due_date: "2026-12-31",
-		qty: 1,
-		rate: 100,
-	});
+	const name = site.apply(NEW_INVOICE);
 	runner.notify(name);
 	runner.list.process_document_refreshes();
 	for (let i = 0; i < 5; i++) await tick();
@@ -78,4 +80,30 @@ async function run(git_ref) {
 
 test("a change that arrives during a full refresh is applied again after it", async () => {
 	assert.equal(await run(null), null);
+});
+
+test("a change that arrives right after the response of a full refresh is not dropped", async () => {
+	const source = await load_list_view(process.env.FRAPPE_PATH, null);
+	const site = create_site();
+	const runner = new ListRunner(source, site, VIEW, { event_reduce: true });
+	await runner.open();
+
+	// the write happens after the server answered, its event arrives when the rows are
+	// rendered, before the list is done with the refresh
+	const reset_defaults = runner.list.reset_defaults.bind(runner.list);
+	let name;
+	runner.list.reset_defaults = () => {
+		reset_defaults();
+		if (!name) {
+			name = site.apply(NEW_INVOICE);
+			runner.notify(name);
+		}
+	};
+	runner.list.last_args = null;
+	await runner.list.refresh();
+	await runner.idle();
+	assert.ok(name);
+	// the debounce fires
+	await runner.flush();
+	assert.equal(compare(runner.list.data, runner.truth()), null);
 });

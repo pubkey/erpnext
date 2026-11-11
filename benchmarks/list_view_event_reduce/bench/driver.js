@@ -250,6 +250,7 @@ function instrument_page() {
 				rows,
 				db_queries: Number(this.getResponseHeader("X-Bench-Db-Queries")),
 				server_ms: Number(this.getResponseHeader("X-Bench-Server-Ms")),
+				at: Math.round(started),
 				ms: performance.now() - started,
 			});
 			// the rendering happens right after the response
