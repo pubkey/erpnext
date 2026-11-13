@@ -1,0 +1,13 @@
+{
+  "name": "list-view-event-reduce-benchmark",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "harness": "node harness/run.js",
+    "test": "node --test \"test/*.test.js\"",
+    "bench": "node bench/driver.js"
+  },
+  "dependencies": {
+    "mysql2": "^3.11.0"
+  }
+}
