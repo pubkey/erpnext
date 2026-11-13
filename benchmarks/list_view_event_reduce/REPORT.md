@@ -34,6 +34,23 @@ The full run of 2,000 events did not finish: the container was restarted twice d
 3-hour runs. The numbers above are the first 1,500 events of the last run with the final
 code. A second run with the same code (1,400 events) agrees.
 
+## Update to event-reduce-js 8.0.0
+
+The patch now depends on `event-reduce-js@8.0.0` (was 7.5.1). No code change was needed: the
+one breaking change that touches this use is that a sort comparator returning 0 for two
+different documents now throws, and the comparator of the patch already breaks ties by name.
+
+Checked with 8.0.0:
+
+- the 25 Node tests pass;
+- the harness run (seed 2026, 2,000 events) gives exactly the same result file as with 7.5.1;
+- on the real bench with rebuilt assets: `bench/stale_refresh_check.js` passes and
+  `bench/refresh_timing_check.mjs` is correct for 16 of 16 timings in both modes.
+
+**Not re-run with 8.0.0:** the long browser benchmark, the harness sweeps over other seeds
+and parameters, and Frappe's own Python and Playwright tests. All browser numbers in this
+report were measured with 7.5.1.
+
 ## What was changed
 
 In Frappe (base `develop` 4c73618), one commit, 443 lines added, 6 removed:
@@ -43,7 +60,7 @@ In Frappe (base `develop` 4c73618), one commit, 443 lines added, 6 removed:
 | `frappe/public/js/frappe/list/list_view.js` | realtime handler uses a result window when the setting is on |
 | `frappe/public/js/frappe/list/list_result_window.js` | new: filters → selector, ChangeEvents, EventReduce + buffer |
 | `system_settings.json` / `.py` | Check `event_reduce_list_updates`, default 0 |
-| `package.json`, `yarn.lock` | `event-reduce-js@7.5.1` |
+| `package.json`, `yarn.lock` | `event-reduce-js@8.0.0` |
 
 How it works with the setting on:
 
@@ -231,7 +248,8 @@ again after them. After the fixes I ran the Node tests, pre-commit and the two b
 - **The client-side matcher is close to redundant** in practice: the server already applies
   the filters to the by-name fetch. The selector is used as a gate (can this list be handled?)
   and as a guard.
-- **Bundle size:** `list.bundle` grows by 12.6 kB minified, 4.6 kB gzipped.
+- **Bundle size:** `list.bundle` grows by 12.6 kB minified, 4.6 kB gzipped (measured with
+  7.5.1; the built bundle is 0.5 kB larger with 8.0.0).
 - **Not tested:** group-by sidebar counts, other views (report, kanban, image), lists with
   child-table or `or` filters (they fall back to full refresh by design), several users with
   different permissions, slow or flaky networks, the single Playwright failure against a

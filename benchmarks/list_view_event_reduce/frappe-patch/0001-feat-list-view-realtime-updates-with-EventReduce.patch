@@ -1,4 +1,4 @@
-From 528677cbabd0b1e59a4299475aaabe4aca513e84 Mon Sep 17 00:00:00 2001
+From bcedd6ce18e1de6a1c77b18504e1268bd9a02dd4 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 11 Nov 2026 14:49:45 +0000
 Subject: [PATCH] feat(list view): realtime updates with EventReduce (behind a
@@ -571,19 +571,19 @@ index 7bfc1e2..7e0c652 100644
  		if (this.filter_area?.is_being_edited()) {
  			return true;
 diff --git a/package.json b/package.json
-index 7f07b2b..7297215 100644
+index 7f07b2b..65d646f 100644
 --- a/package.json
 +++ b/package.json
 @@ -46,6 +46,7 @@
      "editorjs-undo": "0.1.6",
      "esbuild": "^0.28.1",
      "esbuild-plugin-vue3": "^0.3.0",
-+    "event-reduce-js": "7.5.1",
++    "event-reduce-js": "8.0.0",
      "fast-deep-equal": "^2.0.1",
      "fast-glob": "^3.2.5",
      "frappe-charts": "2.0.0-rc31",
 diff --git a/yarn.lock b/yarn.lock
-index f704fec..b24f4e7 100644
+index f704fec..df68361 100644
 --- a/yarn.lock
 +++ b/yarn.lock
 @@ -714,11 +714,21 @@ anymatch@~3.1.2:
@@ -612,10 +612,10 @@ index f704fec..b24f4e7 100644
    resolved "https://registry.yarnpkg.com/estree-walker/-/estree-walker-2.0.2.tgz#52f010178c2a4c117a7757cfe942adb7d2da4cac"
    integrity sha512-Rfkk/Mp/DL7JVje3u18FxFujQlTNR2q6QfMSMB7AvCBx91NGj/ba3kCfza0f6dVDbw7YlRf/nDrn7pQrCCyQ/w==
  
-+event-reduce-js@7.5.1:
-+  version "7.5.1"
-+  resolved "https://registry.yarnpkg.com/event-reduce-js/-/event-reduce-js-7.5.1.tgz#786d9f81b884784b250f5c69c2c995a8b6660ca6"
-+  integrity sha512-Zsqh0WFnI9NiTRuYlRmpcOrDtgia3yeFfm1akJXSbIXlAUYhYMbOIynIGvmkyUUiNA5EODWNfNAuwDXPy3G/kg==
++event-reduce-js@8.0.0:
++  version "8.0.0"
++  resolved "https://registry.yarnpkg.com/event-reduce-js/-/event-reduce-js-8.0.0.tgz#0e06ee45584b4cf57230216b6e2c41ac737d9d6d"
++  integrity sha512-rsoEJTbdPBeG1QorRSVrEhjK7qU1lfAz5e6ctnmss58K1axv8S80rM8oOvxJKS2dnjNSwLNIVRyjGlj7KtrEKQ==
 +  dependencies:
 +    array-push-at-sort-position "5.0.0"
 +    binary-decision-diagram "6.0.1"
