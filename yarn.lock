@@ -2,6 +2,24 @@
 # yarn lockfile v1
 
 
+array-push-at-sort-position@5.0.0:
+  version "5.0.0"
+  resolved "https://registry.yarnpkg.com/array-push-at-sort-position/-/array-push-at-sort-position-5.0.0.tgz#89a87c138865056a7ae37526922c8b6b75ceefb7"
+  integrity sha512-17lCQ5mcO+ybx8b0zU9fWniRj48K7Sa7XIwEeYA6p65NT+KCV6lMGYyPon2Kr5uBGOd4f8oAiz9xnEImEzmEog==
+
+binary-decision-diagram@6.0.1:
+  version "6.0.1"
+  resolved "https://registry.yarnpkg.com/binary-decision-diagram/-/binary-decision-diagram-6.0.1.tgz#063afc77afd9125b9f00788525ef98f438e7798a"
+  integrity sha512-5GJuGrCGyrDLAXhOH6Iw8dE4xo92dpT/972wVz4qkegUD4gN/fm3XwhSDZwMXyUCjovq4sKmgBlh4Z4gFwlu+w==
+
+event-reduce-js@8.0.0:
+  version "8.0.0"
+  resolved "https://registry.yarnpkg.com/event-reduce-js/-/event-reduce-js-8.0.0.tgz#0e06ee45584b4cf57230216b6e2c41ac737d9d6d"
+  integrity sha512-rsoEJTbdPBeG1QorRSVrEhjK7qU1lfAz5e6ctnmss58K1axv8S80rM8oOvxJKS2dnjNSwLNIVRyjGlj7KtrEKQ==
+  dependencies:
+    array-push-at-sort-position "5.0.0"
+    binary-decision-diagram "6.0.1"
+
 occt-import-js@^0.0.23:
   version "0.0.23"
   resolved "https://registry.yarnpkg.com/occt-import-js/-/occt-import-js-0.0.23.tgz#1916aacd5b228e92da5de631ae048ca152281778"
