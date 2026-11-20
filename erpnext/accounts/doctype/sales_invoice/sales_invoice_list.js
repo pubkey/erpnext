@@ -33,6 +33,8 @@ frappe.listview_settings["Sales Invoice"] = {
 	right_column: "grand_total",
 
 	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+
 		if (frappe.model.can_create("Delivery Note")) {
 			listview.page.add_action_item(__("Delivery Note"), () => {
 				erpnext.bulk_transaction_processing.create(listview, "Sales Invoice", "Delivery Note");
