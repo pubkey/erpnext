@@ -49,6 +49,8 @@ frappe.listview_settings["Purchase Order"] = {
 		}
 	},
 	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+
 		var method = "erpnext.buying.doctype.purchase_order.purchase_order.close_or_unclose_purchase_orders";
 
 		listview.page.add_action_item(__("Close"), function () {

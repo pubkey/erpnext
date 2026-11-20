@@ -1,5 +1,7 @@
 frappe.listview_settings["Payment Entry"] = {
 	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+
 		if (listview.page.fields_dict.party_type) {
 			listview.page.fields_dict.party_type.get_query = function () {
 				return {
