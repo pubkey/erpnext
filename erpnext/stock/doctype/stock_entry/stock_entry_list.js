@@ -67,4 +67,7 @@ frappe.listview_settings["Stock Entry"] = {
 			return html;
 		},
 	},
+	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+	},
 };

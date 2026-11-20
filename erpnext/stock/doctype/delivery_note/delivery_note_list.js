@@ -27,6 +27,8 @@ frappe.listview_settings["Delivery Note"] = {
 		}
 	},
 	onload: function (doclist) {
+		erpnext.utils.setup_list_event_reduce(doclist);
+
 		const action = () => {
 			const selected_docs = doclist.get_checked_items();
 			const docnames = doclist.get_checked_items(true);

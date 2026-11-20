@@ -8,4 +8,7 @@ frappe.listview_settings["Journal Entry"] = {
 			return [__(doc.voucher_type), "blue", `voucher_type,=,${doc.voucher_type}`];
 		}
 	},
+	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+	},
 };

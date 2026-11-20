@@ -11,6 +11,8 @@ frappe.listview_settings["Quotation"] = {
 	],
 
 	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+
 		if (listview.page.fields_dict.quotation_to) {
 			listview.page.fields_dict.quotation_to.get_query = function () {
 				return {

@@ -47,4 +47,7 @@ frappe.listview_settings["Material Request"] = {
 			}
 		}
 	},
+	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+	},
 };

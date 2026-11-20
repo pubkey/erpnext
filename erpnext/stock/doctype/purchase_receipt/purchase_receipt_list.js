@@ -27,6 +27,8 @@ frappe.listview_settings["Purchase Receipt"] = {
 	},
 
 	onload: function (listview) {
+		erpnext.utils.setup_list_event_reduce(listview);
+
 		listview.page.add_action_item(__("Purchase Invoice"), () => {
 			erpnext.bulk_transaction_processing.create(listview, "Purchase Receipt", "Purchase Invoice");
 		});
